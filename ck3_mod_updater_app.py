@@ -325,7 +325,6 @@ class CK3ModUpdaterApp(tk.Tk):
                 "Installed",
                 "Workshop unavailable/errors",
                 "Duplicate archives",
-                "Non-CK3 files",
             ),
         )
         filter_box.pack(side="left", padx=(8, 0))
@@ -615,8 +614,6 @@ class CK3ModUpdaterApp(tk.Tk):
             return row.workshop_status in {"remote_unavailable", "scan_error"}
         if selected == "Duplicate archives":
             return row.duplicate_count > 1
-        if selected == "Non-CK3 files":
-            return row.archive.status != "ck3_mod"
         return True
 
     def _apply_filter(self) -> None:
