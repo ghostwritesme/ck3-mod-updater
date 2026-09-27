@@ -21,4 +21,4 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Run tests
-        run: python -B -m unittest -v test_mod_scan_core.py test_ck3_game_detection.py test_app_helpers.py
+        run: python -B -m unittest discover -v

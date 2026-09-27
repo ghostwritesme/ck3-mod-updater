@@ -1,8 +1,8 @@
 # CK3 Mod Updater
 
-CK3 Mod Updater is a Windows desktop application for inspecting local Crusader Kings III mod archives and comparing their metadata with the Steam Workshop.
+CK3 Mod Updater is a Windows desktop application for inspecting local Crusader Kings III mod archives, comparing their metadata with the Steam Workshop, and safely replacing verified archives.
 
-The current version is read-only. It does not delete, replace, download, or install mods.
+Scanning is read-only. Archive replacement is an explicit action that requires a user-selected ZIP, creates a verified backup, records a transaction journal, and can be undone.
 
 ## Project status
 
@@ -18,6 +18,21 @@ This project is in active development. The repository currently contains source 
 - Identifies duplicate Workshop IDs and matches archives with installed mods.
 - Provides search, filters, dark and light themes, Workshop links, and JSON or CSV reports.
 - Keeps network failures and unavailable Workshop items distinct from update signals.
+- Records exact archive hashes and Workshop timestamps in a local install-baseline ledger.
+- Validates staged update archives against the selected Workshop ID before replacement.
+- Creates verified backups and uses same-folder atomic replacement.
+- Rolls back automatically after a failed update and during recovery from an interrupted update.
+- Provides a manual undo action for the latest committed update when the archive has not changed again.
+
+## Updating an archive
+
+1. Scan the archive folder.
+2. For an existing archive known to match the current Workshop revision, select it and choose **Record baseline** once.
+3. When a later scan shows **Update available**, obtain the updated ZIP through Steam or another legitimate source.
+4. Select the archive, choose **Apply update file**, and select the downloaded ZIP.
+5. Confirm that the selected ZIP was obtained for the displayed Workshop revision. The application verifies the Workshop ID, stages the ZIP privately, backs up the current archive, replaces it atomically, verifies the result, and only then records the confirmed revision.
+
+The archive descriptor proves the mod identity, not the exact Workshop revision. Revision baselines therefore depend on the user's explicit source confirmation. The public Workshop metadata endpoint does not guarantee a downloadable mod file, and the application does not request or store Steam credentials. File acquisition remains separate from the recoverable replacement workflow.
 
 ## Accuracy
 
@@ -38,12 +53,14 @@ python ck3_mod_updater_app.py
 
 Application settings are stored in `%LOCALAPPDATA%\CK3ModUpdater\settings.json`.
 
+Baselines, transaction journals, staging files, and backups are stored under `%LOCALAPPDATA%\CK3ModUpdater`. These files should not be edited manually.
+
 Exported reports contain archive filenames and scan metadata, not full local filesystem paths.
 
 ## Tests
 
 ```powershell
-python -B -m unittest -v test_mod_scan_core.py test_ck3_game_detection.py test_app_helpers.py
+python -B -m unittest discover -v
 ```
 
 ## Building the Windows executable
@@ -60,9 +77,12 @@ The resulting executable is written to `dist\CK3_Mod_Updater.exe`. Published bin
 - `ck3_mod_updater_app.py` — desktop interface
 - `mod_scan_core.py` — archive inspection and Workshop comparison
 - `ck3_game_detection.py` — automatic CK3 installation and version detection
+- `install_ledger.py` — persistent, hash-bound Workshop install baselines
+- `update_workflow.py` — staging, backups, atomic replacement, rollback, and recovery
 - `test_mod_scan_core.py` — scanner regression tests
 - `test_ck3_game_detection.py` — installation detection tests
 - `test_app_helpers.py` — report formatting tests
+- `test_update_workflow.py` — updater transaction and failure-recovery tests
 - `CK3_Mod_Updater.spec` — PyInstaller configuration
 
 ## Disclaimer

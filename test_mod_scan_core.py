@@ -1,11 +1,13 @@
 """Regression checks for scanner evidence and failure handling."""
 
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
 from mod_scan_core import (
+    ArchiveBaseline,
     archive_timestamp_signal,
     classify_mod,
     declared_compatibility,
@@ -16,6 +18,7 @@ from mod_scan_core import (
     inspect_mod_archive,
     scan_archives,
     scan_mods,
+    sha256_file,
 )
 
 
@@ -235,6 +238,44 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(rows[0].workshop_status, "scan_error")
             self.assertEqual(rows[0].timestamp_signal, "not_applicable")
             self.assertIsNone(rows[0].workshop_updated)
+
+    def test_archive_scan_uses_only_a_hash_verified_baseline(self) -> None:
+        with TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            archive_path = Path(directory, "123_Test.zip")
+            with ZipFile(archive_path, "w") as archive:
+                archive.writestr(
+                    "descriptor.mod",
+                    'name="Test"\nversion="1"\nremote_file_id="123"\n',
+                )
+            baseline = ArchiveBaseline(
+                mod_id="123",
+                archive_path=archive_path.resolve(),
+                archive_sha256=sha256_file(archive_path),
+                workshop_updated=200,
+                recorded_at_utc=datetime.now(timezone.utc).isoformat(),
+                source="test",
+            )
+
+            current = scan_archives(
+                Path(directory),
+                "1.18.0",
+                lambda _ids: [workshop_item("123", 200)],
+                {"123": baseline},
+            )[0]
+            self.assertEqual(current.baseline_status, "no_change_since_recorded_install")
+
+            with ZipFile(archive_path, "w") as archive:
+                archive.writestr(
+                    "descriptor.mod",
+                    'name="Test"\nversion="changed"\nremote_file_id="123"\n',
+                )
+            changed = scan_archives(
+                Path(directory),
+                "1.18.0",
+                lambda _ids: [workshop_item("123", 300)],
+                {"123": baseline},
+            )[0]
+            self.assertEqual(changed.baseline_status, "local_archive_changed")
 
 
 if __name__ == "__main__":

@@ -28,16 +28,18 @@ from typing import Any, Callable
 
 import requests
 from ck3_game_detection import CK3Installation, detect_ck3_installation
+from install_ledger import InstallLedger, LedgerError
 from mod_scan_core import (
     ArchiveScanRow,
     discover_mod_ids,
     fetch_workshop_batch,
     scan_archives,
 )
+from update_workflow import RecoveryResult, UpdateError, UpdateManager, UpdateResult
 
 
 APP_NAME = "CK3 Mod Updater"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.3.0"
 WORKSHOP_ITEM_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id={}"
 
 
@@ -47,6 +49,8 @@ def _app_data_directory() -> Path:
 
 
 SETTINGS_FILE = _app_data_directory() / "settings.json"
+LEDGER_FILE = _app_data_directory() / "install-baselines.json"
+UPDATE_DATA_DIRECTORY = _app_data_directory() / "updates"
 
 
 def _application_asset(filename: str) -> Path:
@@ -131,6 +135,16 @@ def _signal_label(signal: str) -> str:
     }.get(signal, signal.replace("_", " ").title())
 
 
+def _baseline_label(status: str) -> str:
+    return {
+        "unknown_local_version": "No recorded baseline",
+        "changed_since_recorded_install": "Update available",
+        "no_change_since_recorded_install": "Matches recorded install",
+        "local_archive_changed": "Archive changed since record",
+        "baseline_verification_failed": "Baseline verification failed",
+    }.get(status, status.replace("_", " ").title())
+
+
 @dataclass(frozen=True)
 class ResultItem:
     row: ArchiveScanRow
@@ -157,6 +171,10 @@ def build_report_rows(results: list[ResultItem]) -> list[dict[str, Any]]:
                 "workshop_status": row.workshop_status,
                 "workshop_title": row.workshop_title,
                 "workshop_updated_utc": _format_utc(row.workshop_updated),
+                "baseline_status": row.baseline_status,
+                "recorded_workshop_updated_utc": _format_utc(
+                    row.installed_workshop_updated
+                ),
                 "archive_timestamp_signal": row.timestamp_signal,
                 "duplicate_count": row.duplicate_count,
                 "installed": item.installed,
@@ -169,6 +187,8 @@ def build_report_rows(results: list[ResultItem]) -> list[dict[str, Any]]:
 class CK3ModUpdaterApp(tk.Tk):
     def __init__(self) -> None:
         self.settings = load_settings()
+        self.ledger = InstallLedger(LEDGER_FILE)
+        self.update_manager = UpdateManager(UPDATE_DATA_DIRECTORY, self.ledger)
         super().__init__()
         self.title(APP_NAME)
         icon_path = _application_asset("icon.ico")
@@ -216,6 +236,7 @@ class CK3ModUpdaterApp(tk.Tk):
         self.search_var.trace_add("write", lambda *_: self._apply_filter())
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._process_ui_events)
+        self.after(200, self._start_recovery_check)
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=18)
@@ -226,7 +247,7 @@ class CK3ModUpdaterApp(tk.Tk):
         ttk.Label(header, text=APP_NAME, font=("Segoe UI", 22, "bold")).pack(side="left")
         ttk.Label(
             header,
-            text="Workshop archive checker",
+            text="Workshop archive checker and updater",
             style="Secondary.TLabel",
             font=("Segoe UI", 11),
         ).pack(side="left", padx=(12, 0), pady=(7, 0))
@@ -241,8 +262,8 @@ class CK3ModUpdaterApp(tk.Tk):
         ttk.Label(
             outer,
             text=(
-                "Workshop dates and descriptor compatibility are evidence, not proof that an "
-                "archive is current or that a mod works in-game."
+                "Recorded baselines can confirm Workshop changes. Archive updates are validated, "
+                "backed up, and replaced transactionally."
             ),
             style="Warning.TLabel",
         ).pack(fill="x", pady=(6, 14))
@@ -319,6 +340,7 @@ class CK3ModUpdaterApp(tk.Tk):
             width=27,
             values=(
                 "CK3 mods",
+                "Recorded updates available",
                 "All files",
                 "Possible Workshop changes",
                 "Declared for another CK3 version",
@@ -352,7 +374,7 @@ class CK3ModUpdaterApp(tk.Tk):
             "version",
             "compatibility",
             "workshop",
-            "signal",
+            "baseline",
         )
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=19)
         headings = {
@@ -362,7 +384,7 @@ class CK3ModUpdaterApp(tk.Tk):
             "version": "Mod version",
             "compatibility": "Descriptor vs CK3",
             "workshop": "Workshop updated",
-            "signal": "Date evidence",
+            "baseline": "Recorded baseline",
         }
         widths = {
             "name": 280,
@@ -371,7 +393,7 @@ class CK3ModUpdaterApp(tk.Tk):
             "version": 100,
             "compatibility": 170,
             "workshop": 165,
-            "signal": 210,
+            "baseline": 210,
         }
         for column in columns:
             self.tree.heading(column, text=headings[column])
@@ -409,10 +431,40 @@ class CK3ModUpdaterApp(tk.Tk):
             width=18,
         )
         self.folder_button.pack(fill="x")
+        self.record_button = ttk.Button(
+            detail_buttons,
+            text="Record baseline",
+            command=self.record_selected_baseline,
+            state="disabled",
+            style="Secondary.TButton",
+            width=18,
+        )
+        self.record_button.pack(fill="x", pady=(6, 0))
+        self.update_button = ttk.Button(
+            detail_buttons,
+            text="Apply update file…",
+            command=self.apply_selected_update,
+            state="disabled",
+            style="Primary.TButton",
+            width=18,
+        )
+        self.update_button.pack(fill="x", pady=(6, 0))
+        self.undo_button = ttk.Button(
+            detail_buttons,
+            text="Undo last update",
+            command=self.undo_selected_update,
+            state="disabled",
+            style="Secondary.TButton",
+            width=18,
+        )
+        self.undo_button.pack(fill="x", pady=(6, 0))
 
         ttk.Label(
             outer,
-            text=f"{APP_VERSION}  •  Read-only scanning; deletion and automatic replacement are disabled.",
+            text=(
+                f"{APP_VERSION}  •  Baseline-aware scanning with validated backups and "
+                "recoverable archive replacement."
+            ),
             style="Secondary.TLabel",
         ).pack(fill="x", pady=(9, 0))
 
@@ -541,11 +593,13 @@ class CK3ModUpdaterApp(tk.Tk):
 
     def _scan_worker(self, archive_directory: Path, mod_directory: Path, game_version: str) -> None:
         try:
+            baselines = self.ledger.load()
             with requests.Session() as session:
                 rows = scan_archives(
                     archive_directory,
                     game_version,
                     lambda ids: fetch_workshop_batch(session, ids),
+                    baselines,
                 )
             installed_ids = set(discover_mod_ids(mod_directory)) if mod_directory.is_dir() else set()
             results = [
@@ -569,12 +623,14 @@ class CK3ModUpdaterApp(tk.Tk):
         self.after(100, self._process_ui_events)
 
     def _scan_failed(self, detail: str) -> None:
+        self.worker = None
         self.progress.stop()
         self.scan_button.configure(state="normal")
         self.status_var.set("Scan failed")
         messagebox.showerror("Scan failed", detail)
 
     def _scan_finished(self, results: list[ResultItem]) -> None:
+        self.worker = None
         self.results = results
         self.last_scan_utc = datetime.now(timezone.utc).isoformat()
         self.progress.stop()
@@ -585,6 +641,11 @@ class CK3ModUpdaterApp(tk.Tk):
             item
             for item in ck3
             if item.row.timestamp_signal == "remote_newer_than_archive_timestamp"
+            or item.row.baseline_status in {
+                "changed_since_recorded_install",
+                "local_archive_changed",
+                "baseline_verification_failed",
+            }
             or item.row.compatibility == "declared_incompatible"
             or item.row.workshop_status != "available"
             or item.row.duplicate_count > 1
@@ -604,6 +665,8 @@ class CK3ModUpdaterApp(tk.Tk):
         selected = self.filter_var.get()
         if selected == "CK3 mods":
             return row.archive.status == "ck3_mod"
+        if selected == "Recorded updates available":
+            return row.baseline_status == "changed_since_recorded_install"
         if selected == "Possible Workshop changes":
             return row.timestamp_signal == "remote_newer_than_archive_timestamp"
         if selected == "Declared for another CK3 version":
@@ -642,6 +705,12 @@ class CK3ModUpdaterApp(tk.Tk):
             elif row.workshop_status in {"remote_unavailable", "scan_error"}:
                 tags = ("error",)
             elif (
+                row.baseline_status in {
+                    "changed_since_recorded_install",
+                    "local_archive_changed",
+                    "baseline_verification_failed",
+                }
+                or
                 row.timestamp_signal == "remote_newer_than_archive_timestamp"
                 or row.compatibility == "declared_incompatible"
                 or row.duplicate_count > 1
@@ -657,7 +726,7 @@ class CK3ModUpdaterApp(tk.Tk):
                     archive.version or "—",
                     _compatibility_label(row.compatibility),
                     _workshop_label(row),
-                    _signal_label(row.timestamp_signal),
+                    _baseline_label(row.baseline_status),
                 ),
                 tags=tags,
             )
@@ -665,6 +734,9 @@ class CK3ModUpdaterApp(tk.Tk):
         self._set_details("Select an archive to see exactly what each status means.")
         self.workshop_button.configure(state="disabled")
         self.folder_button.configure(state="disabled")
+        self.record_button.configure(state="disabled")
+        self.update_button.configure(state="disabled")
+        self.undo_button.configure(state="disabled")
 
     def _selected_result(self) -> ResultItem | None:
         selected = self.tree.selection()
@@ -685,6 +757,8 @@ class CK3ModUpdaterApp(tk.Tk):
             f"Supported CK3 pattern: {archive.supported_version or 'Not declared'}",
             f"Compatibility result: {_compatibility_label(row.compatibility)}",
             f"Workshop result: {_workshop_label(row)}",
+            f"Recorded baseline: {_baseline_label(row.baseline_status)}",
+            f"Recorded Workshop revision: {_format_utc(row.installed_workshop_updated)}",
             f"Archive-date signal: {_signal_label(row.timestamp_signal)}",
             f"Installed in selected mod folder: {'Yes' if item.installed else 'No'}",
         ]
@@ -698,6 +772,24 @@ class CK3ModUpdaterApp(tk.Tk):
         self._set_details("\n".join(lines))
         self.workshop_button.configure(state="normal" if archive.mod_id else "disabled")
         self.folder_button.configure(state="normal")
+        eligible = bool(
+            archive.status == "ck3_mod"
+            and archive.mod_id
+            and row.workshop_status == "available"
+            and row.workshop_updated
+            and row.duplicate_count == 1
+        )
+        self.record_button.configure(state="normal" if eligible else "disabled")
+        self.update_button.configure(state="normal" if eligible else "disabled")
+        try:
+            transaction_id = (
+                self.update_manager.latest_recoverable(archive.mod_id, archive.archive_path)
+                if archive.mod_id
+                else None
+            )
+        except UpdateError:
+            transaction_id = None
+        self.undo_button.configure(state="normal" if transaction_id else "disabled")
 
     def _set_details(self, text: str) -> None:
         self.details.configure(state="normal")
@@ -719,6 +811,211 @@ class CK3ModUpdaterApp(tk.Tk):
             subprocess.Popen(["explorer", f"/select,{path}"])
         else:
             webbrowser.open(path.parent.as_uri())
+
+    def _start_recovery_check(self) -> None:
+        if self.worker and self.worker.is_alive():
+            self.after(250, self._start_recovery_check)
+            return
+        self.scan_button.configure(state="disabled")
+        self.status_var.set("Checking unfinished update transactions…")
+        self.worker = threading.Thread(target=self._recovery_worker, daemon=True)
+        self.worker.start()
+
+    def _recovery_worker(self) -> None:
+        try:
+            results = self.update_manager.recover_pending()
+        except (LedgerError, OSError, UpdateError) as error:
+            results = [RecoveryResult("startup", "error", str(error))]
+        self.ui_events.put((self._recovery_finished, (results,)))
+
+    def _recovery_finished(self, results: list[RecoveryResult]) -> None:
+        self.worker = None
+        self.scan_button.configure(state="normal")
+        errors = [result.detail for result in results if result.action == "error"]
+        recovered = [result for result in results if result.action != "error"]
+        if errors:
+            self.status_var.set("Update recovery needs attention")
+            messagebox.showerror(
+                "Update recovery failed",
+                "One or more interrupted updates could not be recovered:\n\n"
+                + "\n".join(errors),
+            )
+        elif recovered:
+            self.status_var.set(f"Recovered {len(recovered)} interrupted update operation(s)")
+            messagebox.showinfo(
+                "Update recovery complete",
+                "Interrupted update work was safely cancelled or rolled back.",
+            )
+        else:
+            self.status_var.set("Ready to inspect your archive folder")
+
+    def record_selected_baseline(self) -> None:
+        item = self._selected_result()
+        if not item or not item.row.archive.mod_id or not item.row.workshop_updated:
+            return
+        archive = item.row.archive
+        if not messagebox.askyesno(
+            "Record current baseline",
+            "Only continue if this exact archive is the current Workshop revision.\n\n"
+            f"Archive: {archive.archive_path.name}\n"
+            f"Workshop updated: {_format_utc(item.row.workshop_updated)}\n\n"
+            "The archive hash and Workshop timestamp will be recorded locally.",
+        ):
+            return
+        try:
+            self.ledger.record_archive(
+                archive,
+                item.row.workshop_updated,
+                source="manual_confirmation",
+            )
+        except LedgerError as error:
+            messagebox.showerror("Baseline not recorded", str(error))
+            return
+        messagebox.showinfo(
+            "Baseline recorded",
+            "This exact archive can now be compared reliably with future Workshop updates.",
+        )
+        self.start_scan()
+
+    def _begin_archive_operation(self, status: str) -> None:
+        self.scan_button.configure(state="disabled")
+        self.export_button.configure(state="disabled")
+        self.record_button.configure(state="disabled")
+        self.update_button.configure(state="disabled")
+        self.undo_button.configure(state="disabled")
+        self.progress.start(12)
+        self.status_var.set(status)
+
+    def apply_selected_update(self) -> None:
+        if self.worker and self.worker.is_alive():
+            return
+        item = self._selected_result()
+        if not item or not item.row.archive.mod_id or not item.row.workshop_updated:
+            return
+        archive = item.row.archive
+        candidate = filedialog.askopenfilename(
+            title="Choose the downloaded update archive",
+            initialdir=str(archive.archive_path.parent),
+            filetypes=(("ZIP archives", "*.zip"),),
+        )
+        if not candidate:
+            return
+        if not messagebox.askyesno(
+            "Apply archive update",
+            "The selected ZIP will be validated against the Workshop ID, copied into private "
+            "staging, and verified. The current archive will then be backed up before an atomic "
+            "replacement.\n\n"
+            f"Current: {archive.archive_path}\n"
+            f"Update file: {candidate}\n"
+            f"Workshop revision to record: {_format_utc(item.row.workshop_updated)}\n\n"
+            "Only continue if this ZIP was obtained for the displayed Workshop revision. "
+            "A ZIP descriptor identifies the mod but cannot prove the revision by itself.\n\n"
+            "Continue?",
+        ):
+            return
+        self._begin_archive_operation("Validating and applying staged update…")
+        self.worker = threading.Thread(
+            target=self._update_worker,
+            args=(
+                archive.archive_path,
+                Path(candidate),
+                archive.mod_id,
+                item.row.workshop_updated,
+            ),
+            daemon=True,
+        )
+        self.worker.start()
+
+    def _update_worker(
+        self,
+        current_archive: Path,
+        candidate_archive: Path,
+        mod_id: str,
+        workshop_updated: int,
+    ) -> None:
+        try:
+            prepared = self.update_manager.prepare_update(
+                current_archive,
+                candidate_archive,
+                expected_mod_id=mod_id,
+                workshop_updated=workshop_updated,
+            )
+            result = self.update_manager.apply_update(prepared.transaction_id)
+        except (LedgerError, UpdateError) as error:
+            self.ui_events.put((self._archive_operation_failed, (str(error),)))
+            return
+        self.ui_events.put((self._update_finished, (result,)))
+
+    def _archive_operation_failed(self, detail: str) -> None:
+        self.worker = None
+        self.progress.stop()
+        self.scan_button.configure(state="normal")
+        self.status_var.set("Archive operation failed")
+        messagebox.showerror("Archive operation failed", detail)
+        self._show_selected_details()
+
+    def _update_finished(self, result: UpdateResult) -> None:
+        self.worker = None
+        self.progress.stop()
+        self.scan_button.configure(state="normal")
+        self.status_var.set("Archive update committed")
+        messagebox.showinfo(
+            "Archive updated",
+            "The replacement passed validation and the previous archive was backed up.\n\n"
+            f"Archive: {result.archive_path}\n"
+            f"Backup: {result.backup_path}",
+        )
+        self.start_scan()
+
+    def undo_selected_update(self) -> None:
+        if self.worker and self.worker.is_alive():
+            return
+        item = self._selected_result()
+        if not item or not item.row.archive.mod_id:
+            return
+        try:
+            transaction_id = self.update_manager.latest_recoverable(
+                item.row.archive.mod_id,
+                item.row.archive.archive_path,
+            )
+        except UpdateError as error:
+            messagebox.showerror("Backup unavailable", str(error))
+            return
+        if not transaction_id:
+            messagebox.showinfo("Backup unavailable", "No recoverable update exists for this archive.")
+            return
+        if not messagebox.askyesno(
+            "Undo last archive update",
+            "Restore the verified backup from the last committed update?\n\n"
+            "Rollback is refused if the archive changed after that update.",
+        ):
+            return
+        self._begin_archive_operation("Restoring the previous archive…")
+        self.worker = threading.Thread(
+            target=self._undo_worker,
+            args=(transaction_id,),
+            daemon=True,
+        )
+        self.worker.start()
+
+    def _undo_worker(self, transaction_id: str) -> None:
+        try:
+            result = self.update_manager.rollback(transaction_id)
+        except (LedgerError, UpdateError) as error:
+            self.ui_events.put((self._archive_operation_failed, (str(error),)))
+            return
+        self.ui_events.put((self._undo_finished, (result,)))
+
+    def _undo_finished(self, result: UpdateResult) -> None:
+        self.worker = None
+        self.progress.stop()
+        self.scan_button.configure(state="normal")
+        self.status_var.set("Previous archive restored")
+        messagebox.showinfo(
+            "Update undone",
+            f"The previous archive was restored and verified:\n{result.archive_path}",
+        )
+        self.start_scan()
 
     def _report_rows(self) -> list[dict[str, Any]]:
         return build_report_rows(self.results)

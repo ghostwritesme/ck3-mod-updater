@@ -7,6 +7,7 @@ intentionally excluded from update classification.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
@@ -59,6 +60,18 @@ class ArchiveRecord:
 
 
 @dataclass(frozen=True)
+class ArchiveBaseline:
+    """A recorded Workshop revision bound to one exact local archive."""
+
+    mod_id: str
+    archive_path: Path
+    archive_sha256: str
+    workshop_updated: int
+    recorded_at_utc: str
+    source: str
+
+
+@dataclass(frozen=True)
 class ArchiveScanRow:
     """One archive plus independently reported Workshop and compatibility evidence."""
 
@@ -66,10 +79,21 @@ class ArchiveScanRow:
     workshop_status: str
     workshop_title: str | None = None
     workshop_updated: int | None = None
+    baseline_status: str = "unknown_local_version"
+    installed_workshop_updated: int | None = None
     compatibility: str = "unknown"
     timestamp_signal: str = "not_applicable"
     duplicate_count: int = 1
     detail: str | None = None
+
+
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Return a streaming SHA-256 digest for a local file."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _parse_descriptor(text: str) -> dict[str, str]:
@@ -338,6 +362,7 @@ def scan_archives(
     archive_directory: Path,
     game_version: str,
     fetch_batch: Callable[[Sequence[str]], list[dict[str, Any]]],
+    installed_baselines: Mapping[str, ArchiveBaseline] | None = None,
 ) -> list[ArchiveScanRow]:
     """Inventory archives and add Workshop evidence without claiming a local revision.
 
@@ -345,6 +370,7 @@ def scan_archives(
     files. A Workshop timestamp comparison is explicitly kept as an estimate.
     """
     records = inspect_archive_directory(archive_directory)
+    installed_baselines = installed_baselines or {}
     duplicate_counts = {
         mod_id: len(items) for mod_id, items in duplicate_archive_ids(records).items()
     }
@@ -399,12 +425,33 @@ def scan_archives(
             )
             continue
 
-        classified = classify_mod(record.mod_id, workshop_items.get(record.mod_id))
-        workshop_status = (
-            "available"
-            if classified.status == "unknown_local_version"
-            else classified.status
+        baseline = installed_baselines.get(record.mod_id)
+        installed_workshop_updated: int | None = None
+        baseline_status = "unknown_local_version"
+        if baseline is not None:
+            installed_workshop_updated = baseline.workshop_updated
+            try:
+                same_path = record.archive_path.resolve() == baseline.archive_path.resolve()
+                same_hash = same_path and sha256_file(record.archive_path) == baseline.archive_sha256
+            except OSError:
+                same_hash = False
+                baseline_status = "baseline_verification_failed"
+            else:
+                if not same_path or not same_hash:
+                    baseline_status = "local_archive_changed"
+
+        classified = classify_mod(
+            record.mod_id,
+            workshop_items.get(record.mod_id),
+            installed_workshop_updated if baseline_status == "unknown_local_version" and baseline else None,
         )
+        workshop_status = (
+            classified.status
+            if classified.status in {"remote_unavailable", "scan_error"}
+            else "available"
+        )
+        if baseline is not None and baseline_status == "unknown_local_version":
+            baseline_status = classified.status
         signal = (
             archive_timestamp_signal(record, classified.workshop_updated)
             if workshop_status == "available"
@@ -416,6 +463,8 @@ def scan_archives(
                 workshop_status=workshop_status,
                 workshop_title=classified.title,
                 workshop_updated=classified.workshop_updated,
+                baseline_status=baseline_status,
+                installed_workshop_updated=installed_workshop_updated,
                 compatibility=compatibility,
                 timestamp_signal=signal,
                 duplicate_count=duplicate_counts.get(record.mod_id, 1),
