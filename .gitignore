@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging output
+build/
+dist/
+*.egg-info/
+
+# Local application and report data
+Reports/
+settings.json
+*.log
+
+# Local artwork drafts
+/ck3 mod updater icon v2.*
+/ck3-mod-updater-*.png
+
+# Files not used by the current application
+/PROJECT_*.md
+/ck3_mod_checker.py
+/ck3_mod_updater_gui.py
+/*.txt
+!/requirements.txt
+!/requirements-dev.txt
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
