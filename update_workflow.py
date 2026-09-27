@@ -20,6 +20,7 @@ from install_ledger import (
     baseline_to_payload,
 )
 from mod_scan_core import ArchiveBaseline, inspect_mod_archive, sha256_file
+from update_impact import ImpactError, inspect_archive_structure
 
 
 JOURNAL_SCHEMA_VERSION = 1
@@ -124,6 +125,10 @@ class UpdateManager:
             raise UpdateError("Update journal ID mismatch")
         return payload
 
+    def transaction_phase(self, transaction_id: str) -> str:
+        """Return a transaction phase for higher-level recovery coordination."""
+        return str(self._load_journal(transaction_id).get("phase", ""))
+
     def _paths_from_journal(self, payload: Mapping[str, Any]) -> tuple[Path, Path, Path, Path]:
         try:
             target = Path(str(payload["target_path"]))
@@ -170,6 +175,25 @@ class UpdateManager:
                 raise UpdateError("Workshop ID is invalid")
             if not isinstance(workshop_updated, int) or workshop_updated <= 0:
                 raise UpdateError("Workshop update timestamp is invalid")
+
+            if self.data_directory.is_symlink():
+                raise UpdateError("Private update storage cannot be a symbolic link")
+            try:
+                self.data_directory.mkdir(parents=True, exist_ok=True)
+                required_bytes = (
+                    current_archive.stat().st_size
+                    + candidate_archive.stat().st_size
+                    + 64 * 1024 * 1024
+                )
+                if shutil.disk_usage(self.data_directory).free < required_bytes:
+                    raise UpdateError("Not enough free space to stage, back up, and undo this archive update")
+            except OSError as error:
+                raise UpdateError(f"Could not measure private update storage: {error}") from error
+
+            try:
+                inspect_archive_structure(candidate_archive)
+            except ImpactError as error:
+                raise UpdateError(str(error)) from error
 
             current_record = inspect_mod_archive(current_archive)
             candidate_record = inspect_mod_archive(candidate_archive)
@@ -377,6 +401,20 @@ class UpdateManager:
                 installed_sha256=str(payload["original_sha256"]),
                 workshop_updated=int(payload["workshop_updated"]),
             )
+
+    def cancel_prepared(self, transaction_id: str) -> None:
+        """Remove private staging for a transaction that has not changed its target."""
+        with self._lock:
+            payload = self._load_journal(transaction_id)
+            if payload.get("phase") in {"cancelled", "rolled_back"}:
+                return
+            if payload.get("phase") != "prepared":
+                raise UpdateError("Only an unapplied prepared update can be cancelled")
+            _target, staged, _backup, _archive_root = self._paths_from_journal(payload)
+            staged.unlink(missing_ok=True)
+            payload["phase"] = "cancelled"
+            payload["error"] = "Cancelled before batch replacement"
+            self._write_journal(payload)
 
     def recover_pending(self) -> list[RecoveryResult]:
         """Cancel untouched preparations and restore interrupted replacements."""
