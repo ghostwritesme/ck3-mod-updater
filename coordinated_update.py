@@ -113,6 +113,7 @@ class CoordinatedUpdateManager:
                 "error": None,
             }
             self._write(payload)
+            mutation_started = False
             try:
                 for item in item_list:
                     archive_prepared = self.archive_manager.prepare_update(
@@ -143,6 +144,7 @@ class CoordinatedUpdateManager:
                 archive_results: list[UpdateResult] = []
                 installed_results: list[InstalledDeploymentResult] = []
                 for record in payload["items"]:
+                    mutation_started = True
                     payload["phase"] = "applying"
                     payload["current_mod_id"] = record["mod_id"]
                     self._write(payload)
@@ -165,12 +167,20 @@ class CoordinatedUpdateManager:
             except (UpdateError, DeploymentError, CoordinatedUpdateError) as error:
                 payload["error"] = str(error)
                 recovery_errors = self._rollback_records(payload)
-                payload["phase"] = "rollback_failed" if recovery_errors else "rolled_back"
+                payload["phase"] = (
+                    "rollback_failed"
+                    if recovery_errors
+                    else "rolled_back" if mutation_started else "cancelled"
+                )
                 if recovery_errors:
                     payload["error"] += "; recovery needs attention: " + "; ".join(recovery_errors)
                 self._write(payload)
                 if recovery_errors:
                     raise CoordinatedUpdateError(payload["error"]) from error
+                if not mutation_started:
+                    raise CoordinatedUpdateError(
+                        f"Update validation failed before any archive or installed files were changed: {error}"
+                    ) from error
                 raise CoordinatedUpdateError(
                     f"Update failed; archive and installed changes were rolled back: {error}"
                 ) from error

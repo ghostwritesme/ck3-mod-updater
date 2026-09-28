@@ -95,6 +95,24 @@ class CoordinatedUpdateTests(unittest.TestCase):
             self.assertEqual(sha256_file(current), original_hash)
             self.assertEqual((target / "common" / "value.txt").read_text(encoding="utf-8"), "old")
 
+    def test_validation_failure_does_not_claim_files_were_rolled_back(self) -> None:
+        with TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            current, _candidate, data, _target, mod, item, coordinator = self.make_fixture(Path(directory))
+            invalid_item = BatchPlanItem(
+                item.mod_id,
+                item.name,
+                current,
+                current,
+                item.workshop_updated,
+                compare_archives(current, current),
+            )
+
+            with self.assertRaisesRegex(
+                CoordinatedUpdateError,
+                "before any archive or installed files were changed",
+            ):
+                coordinator.apply([invalid_item], {"123": mod}, data)
+
     def test_manual_undo_restores_archive_and_enabled_installation_together(self) -> None:
         with TemporaryDirectory(dir=Path(__file__).parent) as directory:
             current, _candidate, data, target, mod, item, coordinator = self.make_fixture(Path(directory))

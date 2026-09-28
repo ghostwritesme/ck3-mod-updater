@@ -19,6 +19,7 @@ settings.json
 *.log
 
 # Local artwork drafts
+/assets/
 /ck3 mod updater icon v2.*
 /ck3-mod-updater-*.png
 

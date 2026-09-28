@@ -10,6 +10,8 @@ This project is in active development. The repository currently contains source 
 
 ## Features
 
+- Opens into a focused updater screen with automatic scanning, Enabled/Installed/Downloaded/All views, plain-language statuses, and one consistent action per mod.
+- Keeps paths, evidence, reports, snapshots, preflight checks, batch tools, and recovery controls in a separate Advanced window.
 - Reads mod descriptors directly from ZIP files without extracting them.
 - Separates CK3 archives from unrelated files.
 - Retrieves public Workshop metadata without requiring an API key.
@@ -17,6 +19,7 @@ This project is in active development. The repository currently contains source 
 - Shows descriptor-declared game compatibility separately from Workshop status.
 - Identifies duplicate Workshop IDs and matches archives with installed mods.
 - Provides search, filters, dark and light themes, Workshop links, and JSON or CSV reports.
+- Can display a muted loading-screen background directly from the user's local CK3 installation, use a custom local image, or disable artwork entirely.
 - Keeps network failures and unavailable Workshop items distinct from update signals.
 - Records exact archive hashes and Workshop timestamps in a local install-baseline ledger.
 - Validates staged update archives against the selected Workshop ID before replacement.
@@ -83,7 +86,11 @@ python -m pip install -r requirements.txt
 python ck3_mod_updater_app.py
 ```
 
+On Windows, double-click `CK3 Mod Updater.pyw` to launch the source build without a console window.
+
 Application settings are stored in `%LOCALAPPDATA%\CK3ModUpdater\settings.json`.
+
+CK3 background artwork is read from the detected game and DLC folders at runtime. The project does not include, copy, or redistribute those images. If local artwork is unavailable, the application uses its built-in neutral texture instead.
 
 Baselines, scan history, transaction journals, archive backups, and setup snapshots are stored under `%LOCALAPPDATA%\CK3ModUpdater`. Same-volume installed-mod and restore backups are kept in private `.ck3-mod-updater` folders under the relevant CK3 data or archive-library root. These files should not be edited manually.
 
@@ -109,6 +116,7 @@ The resulting executable is written to `dist\CK3_Mod_Updater.exe`. Published bin
 - `ck3_mod_updater_app.py` — desktop interface
 - `mod_scan_core.py` — archive inspection and Workshop comparison
 - `ck3_game_detection.py` — automatic CK3 installation and version detection
+- `background_art.py` — local loading-screen discovery and non-destructive background rendering
 - `install_ledger.py` — persistent, hash-bound Workshop install baselines
 - `update_workflow.py` — staging, backups, atomic replacement, rollback, and recovery
 - `batch_update.py` — explicit multi-archive update planning and batch rollback
@@ -123,6 +131,7 @@ The resulting executable is written to `dist\CK3_Mod_Updater.exe`. Published bin
 - `preflight.py` — conservative active-setup and save consistency checks
 - `test_mod_scan_core.py` — scanner regression tests
 - `test_ck3_game_detection.py` — installation detection tests
+- `test_background_art.py` — local artwork discovery and rendering tests
 - `test_app_helpers.py` — report formatting tests
 - `test_update_workflow.py` — updater transaction and failure-recovery tests
 - `test_batch_update.py` — batch planning and rollback tests
